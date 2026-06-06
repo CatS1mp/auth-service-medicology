@@ -61,6 +61,7 @@ public class AuthService {
     private final EmailService emailService;
     private final JWTTokenProvider jwtTokenProvider;
     private final AuthenticationManager authenticationManager;
+    private final OAuthTokenVerifierService oAuthTokenVerifierService;
 
     public LoginResponseDTO login(LoginRequestDTO request) {
         try {
@@ -90,51 +91,58 @@ public class AuthService {
 
     @Transactional
     public LoginResponseDTO processOAuthPostLogin(OAuthRequestDTO request) {
-        boolean hasGoogle = request.googleId() != null && !request.googleId().isBlank();
-        boolean hasFacebook = request.facebookId() != null && !request.facebookId().isBlank();
-        if (!hasGoogle && !hasFacebook) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Cần mã người dùng từ nhà cung cấp OAuth.");
+        boolean isGoogle = "google".equalsIgnoreCase(request.provider());
+        boolean isFacebook = "facebook".equalsIgnoreCase(request.provider());
+
+        if (!isGoogle && !isFacebook) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Nhà cung cấp OAuth không hợp lệ. Chấp nhận: google, facebook.");
         }
+
+        OAuthTokenVerifierService.OAuthProfile verified = isGoogle
+                ? oAuthTokenVerifierService.verifyGoogleAccessToken(request.accessToken())
+                : oAuthTokenVerifierService.verifyFacebookAccessToken(request.accessToken());
+
+        String providerId = verified.providerId();
+        String email = verified.email();
+        String name = verified.name();
 
         User user = null;
 
-        if (hasGoogle) {
-            Optional<UserOAuthAccount> byGoogle = userOAuthAccountRepository.findByGoogleUserId(request.googleId());
+        if (isGoogle) {
+            Optional<UserOAuthAccount> byGoogle = userOAuthAccountRepository.findByGoogleUserId(providerId);
             if (byGoogle.isPresent()) {
                 user = byGoogle.get().getUser();
-                if (!user.getEmail().equalsIgnoreCase(request.email())) {
+                if (!user.getEmail().equalsIgnoreCase(email)) {
                     throw new ApiException(HttpStatus.CONFLICT, "Email không khớp tài khoản Google đã liên kết.");
                 }
             }
-        }
-
-        if (user == null && hasFacebook) {
-            Optional<UserOAuthAccount> byFb = userOAuthAccountRepository.findByFacebookUserId(request.facebookId());
+        } else {
+            Optional<UserOAuthAccount> byFb = userOAuthAccountRepository.findByFacebookUserId(providerId);
             if (byFb.isPresent()) {
                 user = byFb.get().getUser();
-                if (!user.getEmail().equalsIgnoreCase(request.email())) {
+                if (!user.getEmail().equalsIgnoreCase(email)) {
                     throw new ApiException(HttpStatus.CONFLICT, "Email không khớp tài khoản Facebook đã liên kết.");
                 }
             }
         }
 
         if (user == null) {
-            user = userRepository.findByEmail(request.email()).orElse(null);
+            user = userRepository.findByEmail(email).orElse(null);
             if (user == null) {
                 User newUser = new User();
-                newUser.setEmail(request.email());
-                newUser.setUsername(request.name());
+                newUser.setEmail(email);
+                newUser.setUsername(name);
                 newUser.setIsVerified(true);
                 newUser.setPasswordHash(null);
                 user = userRepository.save(newUser);
             } else {
                 UserOAuthAccount existing = userOAuthAccountRepository.findByUser(user).orElse(null);
-                if (hasGoogle && existing != null && existing.getGoogleUserId() != null
-                        && !existing.getGoogleUserId().equals(request.googleId())) {
+                if (isGoogle && existing != null && existing.getGoogleUserId() != null
+                        && !existing.getGoogleUserId().equals(providerId)) {
                     throw new ApiException(HttpStatus.CONFLICT, "Email này đã liên kết với tài khoản Google khác.");
                 }
-                if (hasFacebook && existing != null && existing.getFacebookUserId() != null
-                        && !existing.getFacebookUserId().equals(request.facebookId())) {
+                if (isFacebook && existing != null && existing.getFacebookUserId() != null
+                        && !existing.getFacebookUserId().equals(providerId)) {
                     throw new ApiException(HttpStatus.CONFLICT, "Email này đã liên kết với tài khoản Facebook khác.");
                 }
             }
@@ -161,11 +169,10 @@ public class AuthService {
                     return newAccount;
                 });
 
-        if (hasGoogle) {
-            oauthAccount.setGoogleUserId(request.googleId());
-        }
-        if (hasFacebook) {
-            oauthAccount.setFacebookUserId(request.facebookId());
+        if (isGoogle) {
+            oauthAccount.setGoogleUserId(providerId);
+        } else {
+            oauthAccount.setFacebookUserId(providerId);
         }
 
         userOAuthAccountRepository.save(oauthAccount);
@@ -198,7 +205,7 @@ public class AuthService {
 
         // Tạo token
         UUID token = UUID.randomUUID();
-        VerificationToken verificationToken = new VerificationToken(token, user);
+        VerificationToken verificationToken = new VerificationToken(token, user, verifyTokenExpiration);
         tokenRepository.save(verificationToken);
 
         // Gửi mail
@@ -223,7 +230,7 @@ public class AuthService {
                     existingToken.setExpiryDate(java.time.LocalDateTime.now().plusMinutes(verifyTokenExpiration));
                     return existingToken;
                 })
-                .orElseGet(() -> new VerificationToken(token, user));
+                .orElseGet(() -> new VerificationToken(token, user, verifyTokenExpiration));
         tokenRepository.save(verificationToken);
 
         // Gửi mail
@@ -245,7 +252,7 @@ public class AuthService {
                     existingToken.setExpiryDate(java.time.LocalDateTime.now().plusMinutes(resetTokenExpiration));
                     return existingToken;
                 })
-                .orElseGet(() -> new ResetToken(token, user));
+                .orElseGet(() -> new ResetToken(token, user, resetTokenExpiration));
         resetTokenRepository.save(resetToken);
 
         // Gửi mail

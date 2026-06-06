@@ -21,11 +21,10 @@ public class VerificationToken {
     @JoinColumn(name = "user_id", referencedColumnName = "id") // Tạo cột user_id làm khóa ngoại
     private User user;
 
-    // Constructor để tạo token nhanh trong Service
-    public VerificationToken(UUID token, User user) {
+    public VerificationToken(UUID token, User user, long expiryMinutes) {
         this.token = token;
         this.user = user;
-        this.expiryDate = LocalDateTime.now().plusHours(24); // Tự cộng 24 tiếng
+        this.expiryDate = LocalDateTime.now().plusMinutes(expiryMinutes);
     }
     
     // Đừng quên No-Args Constructor cho JPA
